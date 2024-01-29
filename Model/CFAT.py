@@ -317,7 +317,18 @@ def window_partition_triangular(x, window_size, masks):   #[1, 64, 64, 180]
     ws = window_size
     h_ws = h // ws
     w_ws = w // ws
-    '''update after the acceptance'''
+    x = x.view(b, h_ws, ws, w_ws, ws, c)    #b, h/ws, ws, w/ws, ws, c
+    windows = x.permute(0, 1, 3, 5, 2, 4).contiguous().view(-1, ws, ws) #b, h/ws, w/ws, c, ws, ws-->b*(h_ws)*(w_ws)*c, ws, ws
+    #window_mask=torch.zeros((len(masks), windows.shape[0], ws//2 * ws//2), dtype=windows.dtype).to(x.device)
+    window_masks = []
+    for mask in masks:
+        mask = mask.expand(windows.shape[0], -1, -1)
+        window_mask = windows[mask]
+        window_masks.append(window_mask.unsqueeze(0))
+    window_masks = torch.cat(window_masks, dim=0)
+    window_masks = window_masks.view(m, windows.shape[0], -1)
+    m, _, n = window_masks.shape
+    window_masks = window_masks.view(m, -1, c, n).permute(1, 0, 3, 2).contiguous()  #[m, b*(h_ws)*(w_ws)*c, n]->[b*(h_ws)*(w_ws), m, n, c]
     return window_masks
 ###############------Triangular_Window_Partition------###############
 
@@ -325,7 +336,12 @@ def window_partition_triangular(x, window_size, masks):   #[1, 64, 64, 180]
 
 ###############------Triangular_Window_Reverse------###############
 def window_reverse_triangular(x, window_size, masks):
-    '''update after the acceptance'''
+    b_, m, n, c = x.shape   #[b*(h_ws)*(w_ws), m, n, c]
+    x = x.permute(1, 0, 3, 2).contiguous().view(m, -1)  #[m, b*(h_ws)*(w_ws)*c, n]
+    reconstructed = torch.zeros((b_*c, window_size, window_size), dtype=x.dtype).to(x.device)
+    for mask, x_ in zip(masks, x):
+        mask = mask.expand(b_*c, -1, -1)
+        reconstructed[mask] = x_   #[b*(h_ws)*(w_ws)*c, ws, ws]
     return reconstructed
 ###############------Triangular_Window_Reverse------###############
 
@@ -1400,12 +1416,19 @@ class cfat(nn.Module):
     ######----Attention_Mask_for_RW-MSA----######
      
     ######----Attention_Mask_for_TW-MSA----######
+    ###############------Triangular_Window_Mask------###############
     def triangle_masks(self, x):
-
-        '''update after the acceptance'''
-
+        ws = 2*self.window_size
+        rows = torch.arange(ws).unsqueeze(1).repeat(1, ws)
+        cols = torch.arange(ws).unsqueeze(0).repeat(ws, 1)
+    
+        upper_triangle_mask = (cols > rows) & (rows + cols < ws)
+        right_triangle_mask = (cols >= rows) & (rows + cols >= ws)
+        bottom_triangle_mask = (cols < rows) & (rows + cols >= ws-1)
+        left_triangle_mask = (cols <= rows) & (rows + cols < ws-1)
+    
         return [upper_triangle_mask.to(x.device), right_triangle_mask.to(x.device), bottom_triangle_mask.to(x.device), left_triangle_mask.to(x.device)]
-    ######----Attention_Mask_for_TW-MSA----######
+    ###############------Triangular_Window_Mask------###############
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -1455,4 +1478,3 @@ class cfat(nn.Module):
         return x
     ##########-------forward-------##########        
 #######################---------Composite_Fusion_Attention_Transformer(CFAT)---------#######################
-
